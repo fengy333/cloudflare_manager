@@ -62,9 +62,7 @@ cloudflare_manager/
 
 ### 5️⃣ 访问
 
-\`\`\`
 https://你的项目名.pages.dev
-\`\`\`
 
 输入密码即可使用 🎉
 
