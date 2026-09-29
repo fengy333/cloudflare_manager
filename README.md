@@ -23,13 +23,13 @@
 
 ## 📁 目录结构
 
-\`\`\`
-cf-memo/
+```text
+cloudflare_manager/
 ├── index.html          # 前端页面
 ├── functions/
 │   └── api.js          # 后端接口
 └── README.md
-\`\`\`
+```
 
 ---
 
