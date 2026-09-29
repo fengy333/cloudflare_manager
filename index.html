@@ -1,0 +1,1136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CF 资源备忘</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          cf: { orange: '#F6821F', dark: '#1F2937' }
+        }
+      }
+    }
+  }
+</script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+  .fade-in { animation: fadeIn .25s ease-out; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  .modal-mask { backdrop-filter: blur(4px); }
+</style>
+</head>
+<body class="bg-gradient-to-br from-slate-50 to-slate-100 min-h-screen text-slate-800">
+<div id="app"></div>
+<div id="modal-root"></div>
+
+<script>
+/* ==================== 状态 ==================== */
+const state = {
+  password: sessionStorage.getItem('pw') || '',
+  accounts: [],
+  currentId: null,        // 当前进入详情的账号
+  search: '',
+  domainSort: 'expire'
+};
+
+/* ==================== API ==================== */
+const api = {
+  async load() {
+    const res = await fetch('/api', { headers: { 'x-password': state.password } });
+    if (res.status === 401) throw new Error('密码错误');
+    const data = await res.json();
+    return data.accounts || [];
+  },
+  async save(accounts) {
+    const res = await fetch('/api', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-password': state.password },
+      body: JSON.stringify({ accounts })
+    });
+    if (res.status === 401) throw new Error('密码错误');
+    if (!res.ok) throw new Error('保存失败');
+  }
+};
+
+/* ==================== 工具 ==================== */
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const escapeHtml = s => String(s || '').replace(/[&<>"']/g, c => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+}[c]));
+
+function normalizeService(s) {
+  return {
+    id: s.id || uid(),
+    type: s.type || '其他',
+    name: s.name || '',
+    note: s.note || ''
+  };
+}
+function normalizeDomain(d) {
+  if (typeof d === 'string') {
+    return { id: uid(), name: d, expire: '', registrar: '', note: '' };
+  }
+  return {
+    id: d.id || uid(),
+    name: d.name || '',
+    expire: d.expire || '',
+    registrar: d.registrar || '',
+    note: d.note || ''
+  };
+}
+function normalizeAccount(a) {
+  return {
+    id: a.id || uid(),
+    name: a.name || '未命名',
+    email: a.email || '',
+    domains: Array.isArray(a.domains) ? a.domains.map(normalizeDomain) : [],
+    services: Array.isArray(a.services) ? a.services.map(normalizeService) : []
+  };
+}
+
+function expireInfo(expireStr) {
+  if (!expireStr) return null;
+  const d = new Date(expireStr);
+  if (isNaN(d.getTime())) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const days = Math.ceil((d - today) / 86400000);
+
+  let color, text, accent;
+  if (days < 0) { color = 'bg-rose-100 text-rose-700 border-rose-200'; text = `已过期 ${-days} 天`; accent = 'from-rose-400 to-rose-500'; }
+  else if (days === 0) { color = 'bg-rose-100 text-rose-700 border-rose-200'; text = '今天到期'; accent = 'from-rose-400 to-rose-500'; }
+  else if (days <= 30) { color = 'bg-orange-100 text-orange-700 border-orange-200'; text = `${days} 天后到期`; accent = 'from-orange-400 to-orange-500'; }
+  else if (days <= 90) { color = 'bg-amber-50 text-amber-700 border-amber-200'; text = `${days} 天后到期`; accent = 'from-amber-300 to-amber-400'; }
+  else { color = 'bg-emerald-50 text-emerald-700 border-emerald-200'; text = `${days} 天后到期`; accent = 'from-emerald-400 to-emerald-500'; }
+  return { days, text, color, accent };
+}
+
+function sortDomains(domains, mode) {
+  const arr = [...domains];
+  if (mode === 'name') {
+    arr.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  } else if (mode === 'expire') {
+    arr.sort((a, b) => {
+      const ax = a.expire ? new Date(a.expire).getTime() : Infinity;
+      const bx = b.expire ? new Date(b.expire).getTime() : Infinity;
+      return ax - bx;
+    });
+  }
+  return arr;
+}
+
+function registrarUrl(registrar) {
+  if (!registrar) return '';
+  const s = registrar.trim();
+  if (/^https?:\/\//i.test(s)) return s;
+  if (/^[\w-]+(\.[\w-]+)+/.test(s)) return 'https://' + s;
+  return '';
+}
+
+async function persist() {
+  try { await api.save(state.accounts); }
+  catch (e) { toast(e.message, 'error'); }
+}
+
+/* ==================== Toast ==================== */
+function toast(msg, type = 'success') {
+  const colors = { success: 'bg-emerald-500', error: 'bg-rose-500', info: 'bg-slate-700' };
+  const el = document.createElement('div');
+  el.className = `fixed top-6 left-1/2 -translate-x-1/2 ${colors[type]} text-white px-5 py-2.5 rounded-lg shadow-lg text-sm z-[60] fade-in`;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => {
+    el.style.transition = 'opacity .3s, transform .3s';
+    el.style.opacity = '0';
+    el.style.transform = 'translate(-50%, -10px)';
+    setTimeout(() => el.remove(), 300);
+  }, 1800);
+}
+
+/* ==================== 导入 / 导出 ==================== */
+function exportBackup() {
+  const payload = { version: 3, exportedAt: new Date().toISOString(), accounts: state.accounts };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  a.href = url;
+  a.download = `cf-memo-backup-${ts}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast('备份已导出');
+}
+
+function importBackup() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json,application/json';
+  input.onchange = e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      let data;
+      try { data = JSON.parse(ev.target.result); }
+      catch { toast('文件格式错误，不是有效 JSON', 'error'); return; }
+      if (!data || !Array.isArray(data.accounts)) {
+        toast('备份文件格式不正确', 'error'); return;
+      }
+      askImportMode(data.accounts.map(normalizeAccount));
+    };
+    reader.readAsText(file);
+  };
+  input.click();
+}
+
+function askImportMode(incoming) {
+  const root = document.getElementById('modal-root');
+  const currentCount = state.accounts.length;
+  const incomingCount = incoming.length;
+
+  root.innerHTML = `
+    <div class="fixed inset-0 bg-slate-900/40 modal-mask flex items-center justify-center p-4 z-40 fade-in" id="modal-mask">
+      <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 fade-in">
+        <h3 class="text-lg font-semibold mb-2">导入备份</h3>
+        <p class="text-sm text-slate-500 mb-4">
+          备份文件含 <b class="text-slate-800">${incomingCount}</b> 个账号，
+          当前已有 <b class="text-slate-800">${currentCount}</b> 个账号。
+        </p>
+        <div class="space-y-2 mb-5">
+          <button data-mode="merge"
+                  class="w-full text-left p-3 rounded-lg border border-slate-200 hover:border-cf-orange hover:bg-orange-50 transition">
+            <div class="font-medium text-sm">合并（推荐）</div>
+            <div class="text-xs text-slate-500 mt-0.5">保留现有数据，只追加备份中不重复的账号</div>
+          </button>
+          <button data-mode="replace"
+                  class="w-full text-left p-3 rounded-lg border border-slate-200 hover:border-rose-400 hover:bg-rose-50 transition">
+            <div class="font-medium text-sm text-rose-600">覆盖</div>
+            <div class="text-xs text-slate-500 mt-0.5">用备份完全替换现有数据（原有数据会丢失）</div>
+          </button>
+        </div>
+        <div class="flex justify-end">
+          <button id="import-cancel"
+                  class="px-4 py-2 rounded-lg text-slate-600 hover:bg-slate-100 transition">取消</button>
+        </div>
+      </div>
+    </div>`;
+
+  const close = () => root.innerHTML = '';
+  document.getElementById('import-cancel').onclick = close;
+  document.getElementById('modal-mask').onclick = e => {
+    if (e.target.id === 'modal-mask') close();
+  };
+
+  root.querySelectorAll('[data-mode]').forEach(btn => {
+    btn.onclick = async () => {
+      const mode = btn.dataset.mode;
+      close();
+      if (mode === 'merge') await mergeAccounts(incoming);
+      else await replaceAccounts(incoming);
+    };
+  });
+}
+
+async function mergeAccounts(incoming) {
+  const existingIds = new Set(state.accounts.map(a => a.id));
+  const existingKeys = new Set(state.accounts.map(a =>
+    `${(a.name || '').trim()}||${(a.email || '').trim()}`
+  ));
+  let added = 0, skipped = 0;
+
+  for (const acc of incoming) {
+    const key = `${(acc.name || '').trim()}||${(acc.email || '').trim()}`;
+    if (existingIds.has(acc.id) || existingKeys.has(key)) { skipped++; continue; }
+    state.accounts.push(normalizeAccount(acc));
+    existingIds.add(acc.id);
+    existingKeys.add(key);
+    added++;
+  }
+
+  await persist();
+  render();
+  toast(`合并完成：新增 ${added} 个账号，跳过 ${skipped} 个重复`);
+}
+
+async function replaceAccounts(incoming) {
+  state.accounts = incoming.map(normalizeAccount);
+  state.currentId = null;
+  await persist();
+  render();
+  toast(`已覆盖导入 ${state.accounts.length} 个账号`);
+}
+
+/* ==================== 通用弹窗 ==================== */
+function openModal({ title, fields, onSubmit }) {
+  const root = document.getElementById('modal-root');
+  const fieldsHtml = fields.map(f => {
+    const base = 'w-full px-3 py-2 border border-slate-200 rounded-lg focus:border-cf-orange focus:ring-2 focus:ring-orange-100 outline-none transition';
+    if (f.type === 'select') {
+      const opts = f.options.map(o =>
+        `<option value="${escapeHtml(o)}" ${o === f.value ? 'selected' : ''}>${escapeHtml(o)}</option>`
+      ).join('');
+      return `
+        <label class="block mb-3">
+          <span class="block text-sm text-slate-600 mb-1">${escapeHtml(f.label)}</span>
+          <select name="${f.name}" class="${base}">${opts}</select>
+        </label>`;
+    }
+    if (f.type === 'textarea') {
+      return `
+        <label class="block mb-3">
+          <span class="block text-sm text-slate-600 mb-1">${escapeHtml(f.label)}</span>
+          <textarea name="${f.name}" rows="${f.rows || 3}" placeholder="${escapeHtml(f.placeholder || '')}"
+                    class="${base} resize-none">${escapeHtml(f.value || '')}</textarea>
+        </label>`;
+    }
+    return `
+      <label class="block mb-3">
+        <span class="block text-sm text-slate-600 mb-1">${escapeHtml(f.label)}</span>
+        <input name="${f.name}" type="${f.type || 'text'}" value="${escapeHtml(f.value || '')}"
+               placeholder="${escapeHtml(f.placeholder || '')}" class="${base}" ${f.required ? 'required' : ''}>
+      </label>`;
+  }).join('');
+
+  root.innerHTML = `
+    <div class="fixed inset-0 bg-slate-900/40 modal-mask flex items-center justify-center p-4 z-40 fade-in" id="modal-mask">
+      <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 fade-in max-h-[90vh] overflow-y-auto">
+        <h3 class="text-lg font-semibold mb-4">${escapeHtml(title)}</h3>
+        <form id="modal-form">
+          ${fieldsHtml}
+          <div class="flex justify-end gap-2 mt-5">
+            <button type="button" id="modal-cancel"
+                    class="px-4 py-2 rounded-lg text-slate-600 hover:bg-slate-100 transition">取消</button>
+            <button type="submit"
+                    class="px-4 py-2 rounded-lg bg-cf-orange text-white hover:bg-orange-600 transition shadow-sm">确定</button>
+          </div>
+        </form>
+      </div>
+    </div>`;
+
+  const close = () => root.innerHTML = '';
+  document.getElementById('modal-cancel').onclick = close;
+  document.getElementById('modal-mask').onclick = e => {
+    if (e.target.id === 'modal-mask') close();
+  };
+  document.getElementById('modal-form').onsubmit = e => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const data = {};
+    fields.forEach(f => data[f.name] = (fd.get(f.name) || '').toString().trim());
+    if (onSubmit(data) !== false) close();
+  };
+  setTimeout(() => root.querySelector('input,select,textarea')?.focus(), 50);
+}
+
+function confirmModal(message, onConfirm) {
+  const root = document.getElementById('modal-root');
+  root.innerHTML = `
+    <div class="fixed inset-0 bg-slate-900/40 modal-mask flex items-center justify-center p-4 z-40 fade-in" id="modal-mask">
+      <div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 fade-in">
+        <div class="flex items-start gap-3">
+          <div class="flex-shrink-0 w-10 h-10 rounded-full bg-rose-100 flex items-center justify-center">
+            <svg class="w-5 h-5 text-rose-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M12 9v2m0 4h.01M5.07 19h13.86a2 2 0 001.74-3l-6.93-12a2 2 0 00-3.48 0l-6.93 12a2 2 0 001.74 3z"/>
+            </svg>
+          </div>
+          <div class="flex-1">
+            <h3 class="font-semibold mb-1">确认删除</h3>
+            <p class="text-sm text-slate-500">${escapeHtml(message)}</p>
+          </div>
+        </div>
+        <div class="flex justify-end gap-2 mt-5">
+          <button id="modal-cancel"
+                  class="px-4 py-2 rounded-lg text-slate-600 hover:bg-slate-100 transition">取消</button>
+          <button id="modal-ok"
+                  class="px-4 py-2 rounded-lg bg-rose-500 text-white hover:bg-rose-600 transition shadow-sm">删除</button>
+        </div>
+      </div>
+    </div>`;
+  const close = () => root.innerHTML = '';
+  document.getElementById('modal-cancel').onclick = close;
+  document.getElementById('modal-mask').onclick = e => {
+    if (e.target.id === 'modal-mask') close();
+  };
+  document.getElementById('modal-ok').onclick = () => { close(); onConfirm(); };
+}
+
+/* ==================== 域名详情弹窗 ==================== */
+function openDomainDetail(accId, domId) {
+  const acc = state.accounts.find(a => a.id === accId);
+  const d = acc.domains.find(x => x.id === domId);
+  if (!d) return;
+
+  const root = document.getElementById('modal-root');
+  const info = expireInfo(d.expire);
+  const regUrl = registrarUrl(d.registrar);
+
+  root.innerHTML = `
+    <div class="fixed inset-0 bg-slate-900/50 modal-mask flex items-center justify-center p-4 z-40 fade-in" id="modal-mask">
+      <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg fade-in max-h-[90vh] overflow-y-auto">
+        <div class="px-6 pt-6 pb-4 border-b border-slate-100">
+          <div class="flex items-start gap-4">
+            <div class="flex-shrink-0 w-12 h-12 rounded-xl bg-gradient-to-br from-orange-400 to-orange-500 text-white flex items-center justify-center shadow-sm shadow-orange-200">
+              <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/>
+              </svg>
+            </div>
+            <div class="flex-1 min-w-0">
+              <h3 class="font-bold text-lg break-all">${escapeHtml(d.name)}</h3>
+              <div class="flex items-center gap-2 mt-1 flex-wrap">
+                ${info ? `<span class="text-xs px-2 py-0.5 rounded-full border ${info.color}">${escapeHtml(info.text)}</span>` : '<span class="text-xs text-slate-400">未设置到期时间</span>'}
+                ${regUrl ? `<a href="${escapeHtml(regUrl)}" target="_blank" rel="noopener"
+                              class="text-xs text-cf-orange hover:underline">前往注册商 ↗</a>` : ''}
+              </div>
+            </div>
+            <button id="detail-close" class="text-slate-400 hover:text-slate-700 transition p-1 flex-shrink-0">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="px-6 py-4 space-y-3">
+          <div class="flex items-start gap-3">
+            <div class="w-8 text-slate-400 text-xs mt-0.5">到期</div>
+            <div class="flex-1 text-sm">${d.expire ? escapeHtml(d.expire) : '<span class="text-slate-400">未填写</span>'}</div>
+          </div>
+          <div class="flex items-start gap-3">
+            <div class="w-8 text-slate-400 text-xs mt-0.5">注册</div>
+            <div class="flex-1 text-sm break-all">
+              ${d.registrar
+                ? (regUrl
+                    ? `<a href="${escapeHtml(regUrl)}" target="_blank" rel="noopener" class="text-cf-orange hover:underline">${escapeHtml(d.registrar)} ↗</a>`
+                    : escapeHtml(d.registrar))
+                : '<span class="text-slate-400">未填写</span>'}
+            </div>
+          </div>
+          <div class="flex items-start gap-3">
+            <div class="w-8 text-slate-400 text-xs mt-0.5">备注</div>
+            <div class="flex-1 text-sm whitespace-pre-wrap break-all">${d.note ? escapeHtml(d.note) : '<span class="text-slate-400">无</span>'}</div>
+          </div>
+        </div>
+
+        <div class="px-6 py-4 border-t border-slate-100 flex items-center justify-between gap-2">
+          <button id="detail-del"
+                  class="px-4 py-2 rounded-lg text-rose-600 hover:bg-rose-50 transition text-sm flex items-center gap-1.5">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3"/>
+            </svg>
+            删除
+          </button>
+          <div class="flex gap-2">
+            <button id="detail-cancel"
+                    class="px-4 py-2 rounded-lg text-slate-600 hover:bg-slate-100 transition text-sm">关闭</button>
+            <button id="detail-edit"
+                    class="px-4 py-2 rounded-lg bg-cf-orange text-white hover:bg-orange-600 transition text-sm shadow-sm flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+              </svg>
+              编辑
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+  const close = () => root.innerHTML = '';
+  document.getElementById('detail-close').onclick = close;
+  document.getElementById('detail-cancel').onclick = close;
+  document.getElementById('modal-mask').onclick = e => {
+    if (e.target.id === 'modal-mask') close();
+  };
+  document.getElementById('detail-edit').onclick = () => {
+    close();
+    editDomain(accId, domId);
+  };
+  document.getElementById('detail-del').onclick = () => {
+    close();
+    delDomain(accId, domId);
+  };
+}
+
+/* ==================== 图标 ==================== */
+const ICONS = {
+  worker: `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>`,
+  pages:  `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>`,
+  tunnel: `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>`,
+  r2:     `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/></svg>`,
+  other:  `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>`
+};
+
+function typeStyle(type) {
+  const t = (type || '').toLowerCase();
+  if (t.includes('worker')) return { cls: 'bg-orange-50 text-orange-700 border-orange-200', icon: ICONS.worker };
+  if (t.includes('page'))   return { cls: 'bg-blue-50 text-blue-700 border-blue-200', icon: ICONS.pages };
+  if (t.includes('tunnel')) return { cls: 'bg-emerald-50 text-emerald-700 border-emerald-200', icon: ICONS.tunnel };
+  if (t.includes('r2'))     return { cls: 'bg-purple-50 text-purple-700 border-purple-200', icon: ICONS.r2 };
+  return { cls: 'bg-slate-50 text-slate-600 border-slate-200', icon: ICONS.other };
+}
+
+/* ==================== 渲染 ==================== */
+function render() {
+  const app = document.getElementById('app');
+
+  /* -------- 登录页 -------- */
+  if (!state.password) {
+    app.innerHTML = `
+      <div class="min-h-screen flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl shadow-xl w-full max-w-sm p-8 fade-in">
+          <div class="text-center mb-6">
+            <div class="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-br from-cf-orange to-orange-400 text-white mb-3 shadow-lg shadow-orange-200">
+              <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"/>
+              </svg>
+            </div>
+            <h1 class="text-xl font-bold">CF 资源备忘</h1>
+            <p class="text-sm text-slate-500 mt-1">输入密码进入</p>
+          </div>
+          <form id="pw-form">
+            <input id="pw-input" type="password" placeholder="密码"
+                   class="w-full px-4 py-2.5 border border-slate-200 rounded-lg focus:border-cf-orange focus:ring-2 focus:ring-orange-100 outline-none transition mb-3"
+                   autofocus>
+            <button type="submit"
+                    class="w-full py-2.5 bg-cf-orange text-white rounded-lg hover:bg-orange-600 transition font-medium shadow-sm shadow-orange-200">
+              进入
+            </button>
+            <p id="pw-err" class="text-rose-500 text-sm mt-3 text-center hidden">密码错误</p>
+          </form>
+        </div>
+      </div>`;
+
+    document.getElementById('pw-form').onsubmit = async e => {
+      e.preventDefault();
+      state.password = document.getElementById('pw-input').value;
+      try {
+        const raw = await api.load();
+        state.accounts = raw.map(normalizeAccount);
+        sessionStorage.setItem('pw', state.password);
+        render();
+      } catch {
+        document.getElementById('pw-err').classList.remove('hidden');
+        state.password = '';
+      }
+    };
+    return;
+  }
+
+  /* -------- 主界面 -------- */
+  const current = state.accounts.find(a => a.id === state.currentId);
+  const totalServices = state.accounts.reduce((n, a) => n + a.services.length, 0);
+  const totalDomains = state.accounts.reduce((n, a) => n + a.domains.length, 0);
+
+  const expiringSoon = [];
+  state.accounts.forEach(a => {
+    a.domains.forEach(d => {
+      const info = expireInfo(d.expire);
+      if (info && info.days <= 30) {
+        expiringSoon.push({ acc: a, dom: d, info });
+      }
+    });
+  });
+  expiringSoon.sort((x, y) => x.info.days - y.info.days);
+
+  app.innerHTML = `
+    <header class="bg-white/80 backdrop-blur border-b border-slate-200 sticky top-0 z-30">
+      <div class="max-w-6xl mx-auto px-4 py-3 flex items-center gap-3">
+        <div class="flex items-center gap-2 flex-shrink-0">
+          <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-cf-orange to-orange-400 text-white flex items-center justify-center shadow-sm shadow-orange-200">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"/>
+            </svg>
+          </div>
+          <span class="font-bold hidden sm:inline">CF 备忘</span>
+        </div>
+
+        <div class="flex-1 max-w-md relative">
+          <svg class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z"/>
+          </svg>
+          <input id="search" type="text" value="${escapeHtml(state.search)}"
+                 placeholder="搜索账号 / 域名 / 服务..."
+                 class="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:bg-white focus:border-cf-orange focus:ring-2 focus:ring-orange-100 outline-none transition">
+        </div>
+
+        <div class="text-xs text-slate-500 hidden md:flex items-center gap-3">
+          <span>账号 <b class="text-slate-800">${state.accounts.length}</b></span>
+          <span class="w-px h-4 bg-slate-200"></span>
+          <span>服务 <b class="text-slate-800">${totalServices}</b></span>
+          <span class="w-px h-4 bg-slate-200"></span>
+          <span>域名 <b class="text-slate-800">${totalDomains}</b></span>
+        </div>
+
+        <div class="flex items-center gap-1 flex-shrink-0">
+          <button id="btn-import" title="从备份文件导入"
+                  class="p-2 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800 transition">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12m0 0l-4-4m4 4l4-4"/>
+            </svg>
+          </button>
+          <button id="btn-export" title="导出备份文件"
+                  class="p-2 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800 transition">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 16V4m0 0l-4 4m4-4l4 4"/>
+            </svg>
+          </button>
+          <button id="logout"
+                  class="text-sm text-slate-500 hover:text-rose-500 transition px-2">退出</button>
+        </div>
+      </div>
+
+      ${expiringSoon.length ? `
+        <div class="bg-amber-50 border-t border-amber-200">
+          <div class="max-w-6xl mx-auto px-4 py-2 flex items-center gap-2 text-xs text-amber-800 overflow-x-auto">
+            <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <span class="font-medium flex-shrink-0">即将到期：</span>
+            ${expiringSoon.slice(0, 6).map(e => `
+              <span class="flex-shrink-0 px-2 py-0.5 bg-white rounded border border-amber-200">
+                ${escapeHtml(e.dom.name)}
+                <b class="${e.info.days < 0 ? 'text-rose-600' : 'text-amber-700'}">${escapeHtml(e.info.text)}</b>
+              </span>`).join('')}
+            ${expiringSoon.length > 6 ? `<span class="text-amber-600 flex-shrink-0">等 ${expiringSoon.length} 个</span>` : ''}
+          </div>
+        </div>` : ''}
+    </header>
+
+    <main class="max-w-6xl mx-auto px-4 py-6">
+      ${current ? renderAccountDetail(current) : renderAccountGrid()}
+    </main>`;
+
+  document.getElementById('logout').onclick = () => {
+    sessionStorage.removeItem('pw');
+    state.password = '';
+    state.accounts = [];
+    state.currentId = null;
+    state.search = '';
+    render();
+  };
+
+  document.getElementById('btn-export').onclick = exportBackup;
+  document.getElementById('btn-import').onclick = importBackup;
+
+  const searchInput = document.getElementById('search');
+  searchInput.oninput = e => {
+    state.search = e.target.value;
+    render();
+    const el = document.getElementById('search');
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  };
+
+  if (current) {
+    bindAccountDetail(current);
+  } else {
+    bindAccountGrid();
+  }
+}
+
+/* -------- 第一层：账号卡片网格 -------- */
+function renderAccountGrid() {
+  const filteredAccounts = state.search
+    ? state.accounts.filter(a => {
+        const s = state.search.toLowerCase();
+        return a.name.toLowerCase().includes(s) ||
+          (a.email || '').toLowerCase().includes(s) ||
+          a.domains.some(d =>
+            (d.name || '').toLowerCase().includes(s) ||
+            (d.note || '').toLowerCase().includes(s) ||
+            (d.registrar || '').toLowerCase().includes(s)) ||
+          a.services.some(sv => (sv.name || '').toLowerCase().includes(s));
+      })
+    : state.accounts;
+
+  const cardsHtml = filteredAccounts.length
+    ? filteredAccounts.map(a => {
+        const dcount = a.domains.length;
+        const scount = a.services.length;
+        const urgentCount = a.domains.filter(d => {
+          const info = expireInfo(d.expire);
+          return info && info.days <= 30;
+        }).length;
+
+        return `
+          <div data-acc-card="${a.id}"
+               class="group relative bg-white rounded-2xl border border-slate-100 hover:border-orange-200 hover:shadow-lg transition cursor-pointer overflow-hidden fade-in">
+            <div class="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-orange-400 to-orange-500"></div>
+            <div class="p-5">
+              <div class="flex items-start gap-3">
+                <div class="flex-shrink-0 w-12 h-12 rounded-xl bg-gradient-to-br from-orange-400 to-orange-500 text-white flex items-center justify-center shadow-sm shadow-orange-200">
+                  <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
+                  </svg>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <div class="font-semibold truncate">${escapeHtml(a.name)}</div>
+                  <div class="text-xs text-slate-400 truncate mt-0.5">${escapeHtml(a.email || '未填邮箱')}</div>
+                </div>
+                <button data-del-acc="${a.id}"
+                        class="opacity-0 group-hover:opacity-100 transition text-slate-300 hover:text-rose-500 p-1 flex-shrink-0"
+                        title="删除账号">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3"/>
+                  </svg>
+                </button>
+              </div>
+              <div class="mt-4 pt-3 border-t border-slate-50 flex items-center gap-3 text-xs text-slate-500">
+                <span class="flex items-center gap-1">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/>
+                  </svg>
+                  ${dcount} 域名
+                </span>
+                <span class="flex items-center gap-1">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
+                  </svg>
+                  ${scount} 服务
+                </span>
+                ${urgentCount ? `<span class="ml-auto text-[11px] px-1.5 py-0.5 rounded bg-rose-50 text-rose-600 border border-rose-200">${urgentCount} 个快到期</span>` : ''}
+              </div>
+              <div class="mt-3 flex items-center justify-between text-[11px] text-slate-400">
+                <span class="opacity-0 group-hover:opacity-100 transition">点击查看详情</span>
+                <svg class="w-3.5 h-3.5 opacity-0 group-hover:opacity-100 transition" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+                </svg>
+              </div>
+            </div>
+          </div>`;
+      }).join('')
+    : `
+      <div class="col-span-full text-center py-16 text-slate-400">
+        <svg class="w-12 h-12 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
+        </svg>
+        <p class="text-sm">${state.search ? '没有匹配的账号' : '还没有账号，点下面按钮添加'}</p>
+      </div>`;
+
+  return `
+    <div class="flex items-center justify-between mb-5">
+      <h2 class="font-bold text-lg">账号列表</h2>
+      <button id="add-acc"
+              class="flex items-center gap-1.5 text-sm text-white bg-cf-orange hover:bg-orange-600 transition font-medium px-3.5 py-2 rounded-lg shadow-sm shadow-orange-200">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+        </svg>
+        添加账号
+      </button>
+    </div>
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      ${cardsHtml}
+    </div>`;
+}
+
+/* -------- 第二层：账号详情（域名记录 + 服务记录 两个大卡片） -------- */
+function renderAccountDetail(current) {
+  const sortedDomains = sortDomains(current.domains, state.domainSort);
+
+  const domainsHtml = sortedDomains.length
+    ? sortedDomains.map(d => {
+        const info = expireInfo(d.expire);
+        const regUrl = registrarUrl(d.registrar);
+        const accent = info?.accent || 'from-slate-300 to-slate-400';
+        return `
+          <div data-dom-card="${d.id}"
+               class="group relative bg-white rounded-xl border border-slate-100 hover:border-orange-200 hover:shadow-md transition cursor-pointer overflow-hidden fade-in">
+            <div class="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r ${accent}"></div>
+            <div class="p-4">
+              <div class="flex items-start gap-3">
+                <div class="flex-shrink-0 w-10 h-10 rounded-lg bg-gradient-to-br from-orange-400 to-orange-500 text-white flex items-center justify-center shadow-sm shadow-orange-200">
+                  <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/>
+                  </svg>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <div class="font-semibold text-sm truncate" title="${escapeHtml(d.name)}">${escapeHtml(d.name)}</div>
+                  <div class="mt-1.5 flex flex-wrap gap-1.5">
+                    ${info
+                      ? `<span class="text-[11px] px-1.5 py-0.5 rounded border ${info.color}">${escapeHtml(info.text)}</span>`
+                      : `<span class="text-[11px] px-1.5 py-0.5 rounded border bg-slate-50 text-slate-500 border-slate-200">未设到期</span>`
+                    }
+                  </div>
+                </div>
+              </div>
+              <div class="mt-3 space-y-1 text-xs">
+                ${d.expire ? `<div class="flex items-center gap-1.5 text-slate-500">
+                  <svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                  </svg>
+                  <span class="truncate">到期 ${escapeHtml(d.expire)}</span>
+                </div>` : ''}
+                ${d.registrar ? `<div class="flex items-center gap-1.5 text-slate-500">
+                  <svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/>
+                  </svg>
+                  <span class="truncate">${escapeHtml(d.registrar)}</span>
+                </div>` : ''}
+              </div>
+              ${d.note ? `<div class="mt-2 pt-2 border-t border-slate-50 text-xs text-slate-400 line-clamp-2">${escapeHtml(d.note)}</div>` : ''}
+            </div>
+          </div>`;
+      }).join('')
+    : `
+      <div class="text-center py-10 text-slate-400 border-2 border-dashed border-slate-100 rounded-xl">
+        <p class="text-sm">还没有域名记录</p>
+        <p class="text-xs mt-1">点上方"添加域名"开始记录</p>
+      </div>`;
+
+  const servicesHtml = current.services.length
+    ? current.services.map(s => {
+        const { cls, icon } = typeStyle(s.type);
+        return `
+          <div data-svc-card="${s.id}"
+               class="group flex items-start gap-3 p-3 rounded-xl border border-slate-100 hover:border-slate-200 hover:bg-slate-50/50 transition fade-in">
+            <div class="flex-shrink-0 w-9 h-9 rounded-lg border ${cls} flex items-center justify-center">
+              ${icon}
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-medium text-sm truncate">${escapeHtml(s.name)}</span>
+                <span class="text-[10px] px-1.5 py-0.5 rounded border ${cls} flex-shrink-0">${escapeHtml(s.type)}</span>
+              </div>
+              ${s.note ? `<div class="text-xs text-slate-400 truncate mt-0.5">${escapeHtml(s.note)}</div>` : ''}
+            </div>
+            <div class="opacity-0 group-hover:opacity-100 transition flex items-center gap-1 flex-shrink-0">
+              <button data-edit-svc="${s.id}"
+                      class="p-1.5 rounded-md text-slate-500 hover:bg-blue-50 hover:text-blue-600 transition" title="编辑">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+                </svg>
+              </button>
+              <button data-del-svc="${s.id}"
+                      class="p-1.5 rounded-md text-slate-500 hover:bg-rose-50 hover:text-rose-600 transition" title="删除">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3"/>
+                </svg>
+              </button>
+            </div>
+          </div>`;
+      }).join('')
+    : `
+      <div class="text-center py-10 text-slate-400 border-2 border-dashed border-slate-100 rounded-xl">
+        <p class="text-sm">还没有服务记录</p>
+        <p class="text-xs mt-1">点上方"添加服务"开始记录</p>
+      </div>`;
+
+  return `
+    <div class="mb-5 fade-in">
+      <button id="back-to-list"
+              class="flex items-center gap-1.5 text-sm text-slate-500 hover:text-cf-orange transition mb-3">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+        </svg>
+        返回账号列表
+      </button>
+      <div class="flex items-start gap-4 bg-white rounded-2xl border border-slate-100 p-5">
+        <div class="flex-shrink-0 w-14 h-14 rounded-2xl bg-gradient-to-br from-orange-400 to-orange-500 text-white flex items-center justify-center shadow-sm shadow-orange-200">
+          <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
+          </svg>
+        </div>
+        <div class="flex-1 min-w-0">
+          <h2 class="font-bold text-xl truncate">${escapeHtml(current.name)}</h2>
+          <div class="text-sm text-slate-500 mt-0.5 truncate">${escapeHtml(current.email || '未填邮箱')}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+      <!-- 域名记录 大卡片 -->
+      <section class="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 fade-in">
+        <div class="flex items-center justify-between mb-4">
+          <div class="flex items-center gap-2 flex-wrap">
+            <h3 class="font-semibold flex items-center gap-1.5">
+              <svg class="w-4 h-4 text-cf-orange" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/>
+              </svg>
+              域名记录
+              <span class="text-xs text-slate-400 font-normal">(${current.domains.length})</span>
+            </h3>
+            ${current.domains.length ? `
+              <select id="domain-sort"
+                      class="text-xs border border-slate-200 rounded-md px-2 py-1 bg-white focus:border-cf-orange focus:ring-1 focus:ring-orange-100 outline-none text-slate-600">
+                <option value="expire" ${state.domainSort === 'expire' ? 'selected' : ''}>按到期</option>
+                <option value="added"  ${state.domainSort === 'added'  ? 'selected' : ''}>按添加</option>
+                <option value="name"   ${state.domainSort === 'name'   ? 'selected' : ''}>按 A-Z</option>
+              </select>` : ''}
+          </div>
+          <button id="add-domain"
+                  class="flex items-center gap-1 text-xs text-cf-orange hover:text-orange-600 transition font-medium">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+            </svg>
+            添加域名
+          </button>
+        </div>
+        <div id="domain-list" class="grid grid-cols-1 gap-3">
+          ${domainsHtml}
+        </div>
+      </section>
+
+      <!-- 服务记录 大卡片 -->
+      <section class="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 fade-in">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="font-semibold flex items-center gap-1.5">
+            <svg class="w-4 h-4 text-cf-orange" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
+            </svg>
+            服务记录
+            <span class="text-xs text-slate-400 font-normal">(${current.services.length})</span>
+          </h3>
+          <button id="add-svc"
+                  class="flex items-center gap-1 text-xs text-cf-orange hover:text-orange-600 transition font-medium">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+            </svg>
+            添加服务
+          </button>
+        </div>
+        <div id="svc-list" class="space-y-2">
+          ${servicesHtml}
+        </div>
+      </section>
+    </div>`;
+}
+
+/* -------- 第一层事件绑定 -------- */
+function bindAccountGrid() {
+  const addBtn = document.getElementById('add-acc');
+  if (addBtn) {
+    addBtn.onclick = () => {
+      openModal({
+        title: '添加账号',
+        fields: [
+          { name: 'name', label: '账号名称', placeholder: '如：主账号 / 客户A', required: true },
+          { name: 'email', label: '登录邮箱（可选）', type: 'email', placeholder: 'you@example.com' }
+        ],
+        onSubmit: async data => {
+          if (!data.name) return false;
+          const acc = { id: uid(), name: data.name, email: data.email, domains: [], services: [] };
+          state.accounts.push(acc);
+          await persist();
+          render();
+          toast('账号已添加');
+        }
+      });
+    };
+  }
+
+  document.querySelectorAll('[data-acc-card]').forEach(card => {
+    card.onclick = e => {
+      if (e.target.closest('[data-del-acc]')) return;
+      state.currentId = card.dataset.accCard;
+      render();
+    };
+  });
+
+  document.querySelectorAll('[data-del-acc]').forEach(btn => {
+    btn.onclick = e => {
+      e.stopPropagation();
+      const id = btn.dataset.delAcc;
+      const acc = state.accounts.find(a => a.id === id);
+      if (!acc) return;
+      confirmModal(`将删除账号「${acc.name}」及其全部域名和服务，此操作不可恢复。`, async () => {
+        state.accounts = state.accounts.filter(a => a.id !== id);
+        await persist();
+        render();
+        toast('账号已删除');
+      });
+    };
+  });
+}
+
+/* -------- 第二层事件绑定 -------- */
+function bindAccountDetail(current) {
+  document.getElementById('back-to-list').onclick = () => {
+    state.currentId = null;
+    render();
+  };
+
+  document.getElementById('add-domain').onclick = () => addDomain(current.id);
+  document.getElementById('add-svc').onclick = () => addService(current.id);
+
+  const domainSortEl = document.getElementById('domain-sort');
+  if (domainSortEl) {
+    domainSortEl.onchange = e => {
+      state.domainSort = e.target.value;
+      render();
+    };
+  }
+
+  document.querySelectorAll('[data-dom-card]').forEach(card => {
+    card.onclick = () => openDomainDetail(current.id, card.dataset.domCard);
+  });
+
+  document.querySelectorAll('[data-edit-svc]').forEach(btn => {
+    btn.onclick = () => editService(current.id, btn.dataset.editSvc);
+  });
+  document.querySelectorAll('[data-del-svc]').forEach(btn => {
+    btn.onclick = () => delService(current.id, btn.dataset.delSvc);
+  });
+}
+
+/* ==================== 域名：增删改 ==================== */
+function addDomain(accId) {
+  openModal({
+    title: '添加域名记录',
+    fields: [
+      { name: 'name', label: '域名', placeholder: '如：example.com', required: true },
+      { name: 'expire', label: '到期时间', type: 'date' },
+      { name: 'registrar', label: '注册地址（可选）', placeholder: '如：https://dash.cloudflare.com' },
+      { name: 'note', label: '备注（可选）', type: 'textarea', rows: 2 }
+    ],
+    onSubmit: async data => {
+      if (!data.name) return false;
+      const acc = state.accounts.find(a => a.id === accId);
+      acc.domains.push({
+        id: uid(),
+        name: data.name,
+        expire: data.expire,
+        registrar: data.registrar,
+        note: data.note
+      });
+      await persist();
+      render();
+      toast('域名已添加');
+    }
+  });
+}
+
+window.editDomain = (accId, domId) => {
+  const acc = state.accounts.find(a => a.id === accId);
+  const d = acc.domains.find(x => x.id === domId);
+  openModal({
+    title: '编辑域名记录',
+    fields: [
+      { name: 'name', label: '域名', value: d.name, required: true },
+      { name: 'expire', label: '到期时间', type: 'date', value: d.expire },
+      { name: 'registrar', label: '注册地址（可选）', value: d.registrar },
+      { name: 'note', label: '备注（可选）', type: 'textarea', rows: 2, value: d.note }
+    ],
+    onSubmit: async data => {
+      if (!data.name) return false;
+      d.name = data.name;
+      d.expire = data.expire;
+      d.registrar = data.registrar;
+      d.note = data.note;
+      await persist();
+      render();
+      toast('已保存');
+    }
+  });
+};
+
+window.delDomain = (accId, domId) => {
+  const acc = state.accounts.find(a => a.id === accId);
+  const d = acc.domains.find(x => x.id === domId);
+  confirmModal(`确定删除域名「${d.name}」？`, async () => {
+    acc.domains = acc.domains.filter(x => x.id !== domId);
+    await persist();
+    render();
+    toast('域名已删除');
+  });
+};
+
+/* ==================== 服务：增删改 ==================== */
+const SERVICE_TYPES = ['Workers', 'Pages', 'Tunnel', 'R2', '其他'];
+
+function addService(accId) {
+  openModal({
+    title: '添加服务',
+    fields: [
+      { name: 'type', label: '服务类型', type: 'select', options: SERVICE_TYPES, value: 'Workers' },
+      { name: 'name', label: '服务名称', placeholder: '如：my-worker', required: true },
+      { name: 'note', label: '备注（可选）', placeholder: '如：绑定了 xxx.com' }
+    ],
+    onSubmit: async data => {
+      if (!data.name) return false;
+      const acc = state.accounts.find(a => a.id === accId);
+      acc.services.push({ id: uid(), type: data.type, name: data.name, note: data.note });
+      await persist();
+      render();
+      toast('服务已添加');
+    }
+  });
+}
+
+function editService(accId, svcId) {
+  const acc = state.accounts.find(a => a.id === accId);
+  const s = acc.services.find(x => x.id === svcId);
+  openModal({
+    title: '编辑服务',
+    fields: [
+      { name: 'type', label: '服务类型', type: 'select', options: SERVICE_TYPES, value: s.type },
+      { name: 'name', label: '服务名称', value: s.name, required: true },
+      { name: 'note', label: '备注（可选）', value: s.note || '' }
+    ],
+    onSubmit: async data => {
+      if (!data.name) return false;
+      s.type = data.type;
+      s.name = data.name;
+      s.note = data.note;
+      await persist();
+      render();
+      toast('已保存');
+    }
+  });
+}
+
+function delService(accId, svcId) {
+  const acc = state.accounts.find(a => a.id === accId);
+  const s = acc.services.find(x => x.id === svcId);
+  confirmModal(`确定删除服务「${s.name}」？`, async () => {
+    acc.services = acc.services.filter(x => x.id !== svcId);
+    await persist();
+    render();
+    toast('服务已删除');
+  });
+}
+
+/* ==================== 启动 ==================== */
+(async function init() {
+  if (state.password) {
+    try {
+      const raw = await api.load();
+      state.accounts = raw.map(normalizeAccount);
+    } catch {
+      state.password = '';
+    }
+  }
+  render();
+})();
+</script>
+</body>
+</html>
