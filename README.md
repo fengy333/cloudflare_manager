@@ -56,11 +56,9 @@ cloudflare_manager/
 | KV namespace binding | 变量名 `MY_KV`，选择刚建的 KV |
 | Environment variable | `PASSWORD` = 你的密码 |
 
-> ⚠️ 保存后，去 **Deployments** → 最新一条 → `...` → **Retry deployment**，让配置生效
-
 ### 4️⃣ 上传代码
 
-进入 `cloudflare_manager` 文件夹**里面**，选择 `index.html` 和 `_worker.js`，打包成 zip 上传。
+下载 `index.html` 和 `_worker.js`，打包成 zip 上传部署。
 
 ### 5️⃣ 访问
 
