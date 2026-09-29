@@ -1,0 +1,2 @@
+# cloudflare_manager
+一个部署在 Cloudflare Pages上的极简多账号资源备忘工具，用来记录Cloudflare多账号下的域名和服务等内容。
